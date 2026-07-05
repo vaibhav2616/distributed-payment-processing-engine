@@ -2,13 +2,16 @@
 name = "infrastructure-boilerplate"
 version = "0.1.0"
 dependencies = [
-    "fastapi[standard]>=0.115.0",
-    "pydantic-settings>=2.7.0",
-    "sqlalchemy>=2.0.36",
-    "asyncpg>=0.30.0",
+    "aiokafka>=0.12.0",
     "alembic>=1.14.0",
+    "asyncpg>=0.30.0",
+    "fastapi[standard]>=0.115.0",
     "greenlet>=3.5.6",
+    "pydantic-settings>=2.7.0",
     "redis>=5.2.0",
+    "sqladmin>=0.20.0",
+    "sqlalchemy>=2.0.36",
+    "tenacity>=9.1.4",
 ]
 requires-python = ">=3.10"
 [build-system]
