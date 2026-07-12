@@ -1,9 +1,4 @@
-"""
-infrastructure/database/repositories/payment.py
-------------------------------------------------
-SQLAlchemy concrete implementation of AbstractPaymentRepository.
-Maps between domain PaymentEntity and the ORM PaymentModel.
-"""
+"""SQLAlchemy concrete implementation of AbstractPaymentRepository."""
 from __future__ import annotations
 
 from sqlalchemy import select
@@ -17,10 +12,6 @@ from infrastructure.database.models import PaymentModel
 class SqlAlchemyPaymentRepository(AbstractPaymentRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
-
-    # ------------------------------------------------------------------
-    # Mapping helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _to_model(entity: PaymentEntity) -> PaymentModel:
@@ -42,17 +33,11 @@ class SqlAlchemyPaymentRepository(AbstractPaymentRepository):
             created_at=model.created_at,
         )
 
-    # ------------------------------------------------------------------
-    # Port implementation
-    # ------------------------------------------------------------------
-
     async def add(self, entity: PaymentEntity) -> None:
         self._session.add(self._to_model(entity))
 
     async def get(self, transaction_id: str) -> PaymentEntity | None:
-        stmt = select(PaymentModel).where(
-            PaymentModel.transaction_id == transaction_id
-        )
+        stmt = select(PaymentModel).where(PaymentModel.transaction_id == transaction_id)
         result = await self._session.execute(stmt)
         model = result.scalar_one_or_none()
         return self._to_entity(model) if model else None

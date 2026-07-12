@@ -1,8 +1,4 @@
-"""
-infrastructure/database/repositories/outbox.py
------------------------------------------------
-Outbox repository adapter — appends domain events to the outbox table.
-"""
+"""Outbox repository adapter — appends domain events to the transactional outbox table."""
 from __future__ import annotations
 
 import uuid
@@ -24,7 +20,6 @@ class SqlAlchemyOutboxRepository:
         event_type: str,
         payload: str,
     ) -> None:
-        """Append an outbox event that the relay worker will publish to Kafka."""
         event = OutboxEventModel(
             id=str(uuid.uuid4()),
             aggregate_type=aggregate_type,
