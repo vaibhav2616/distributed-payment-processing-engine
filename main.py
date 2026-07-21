@@ -1,32 +1,70 @@
+"""
+main.py
+--------
+FastAPI application factory.
+
+Middleware registration order (outermost → innermost):
+  CorrelationIdMiddleware   ← sets X-Correlation-ID on every request first
+  IdempotencyMiddleware     ← uses Redis; benefits from correlation tracing
+"""
+from __future__ import annotations
+
 import asyncio
+
 from fastapi import FastAPI
+
 from core.config import settings
+from core.logging import configure_logging
 from presentation.api.payments import router as payments_router
-from presentation.middleware.idempotency import IdempotencyMiddleware
+from presentation.middleware import (
+    CorrelationIdMiddleware,
+    IdempotencyMiddleware,
+    register_exception_handlers,
+)
 from infrastructure.messaging.kafka_producer import kafka_producer
 from infrastructure.workers.outbox_relay import poll_outbox_events
 
+
 def create_app() -> FastAPI:
-    app = FastAPI(title=settings.PROJECT_NAME, version="1.0.0")
+    configure_logging(log_level=settings.LOG_LEVEL, log_format=settings.LOG_FORMAT)
+
+    import structlog
+    logger = structlog.get_logger(__name__)
+
+    app = FastAPI(
+        title=settings.PROJECT_NAME,
+        version="1.0.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        responses={422: {"description": "Validation Error"}},
+    )
+
+    register_exception_handlers(app)
+
     app.add_middleware(IdempotencyMiddleware)
-    app.include_router(payments_router)
+    app.add_middleware(CorrelationIdMiddleware)
+
+    app.include_router(payments_router, prefix="/api/v1")
 
     @app.on_event("startup")
-    async def startup_event():
+    async def startup_event() -> None:
         try:
             await kafka_producer.start()
             asyncio.create_task(poll_outbox_events())
-        except Exception as e:
-            print(f"Infrastructure startup warning: {e}")
+            logger.info("application_started", service=settings.PROJECT_NAME)
+        except Exception as exc:
+            logger.warning("infrastructure_startup_warning", error=str(exc))
 
     @app.on_event("shutdown")
-    async def shutdown_event():
+    async def shutdown_event() -> None:
         await kafka_producer.stop()
+        logger.info("application_stopped", service=settings.PROJECT_NAME)
 
-    @app.get("/health")
-    async def health_check():
+    @app.get("/health", tags=["Health"], include_in_schema=False)
+    async def health_check() -> dict:
         return {"status": "healthy", "service": settings.PROJECT_NAME}
 
     return app
+
 
 app = create_app()
