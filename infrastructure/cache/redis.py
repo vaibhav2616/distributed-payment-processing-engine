@@ -1,15 +1,23 @@
+"""
+infrastructure/cache/redis.py
+------------------------------
+Async Redis client with distributed lock primitives.
+"""
 import uuid
 import redis.asyncio as redis
 from core.config import settings
 
+
 class RedisClient:
-    def __init__(self):
+    """Thin async Redis wrapper exposing get/set and atomic distributed lock operations."""
+
+    def __init__(self) -> None:
         self.client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
-    async def get(self, key: str):
+    async def get(self, key: str) -> str | None:
         return await self.client.get(key)
 
-    async def set(self, key: str, value: str, expire: int = 300):
+    async def set(self, key: str, value: str, expire: int = 300) -> None:
         await self.client.set(key, value, ex=expire)
 
     async def acquire_lock(self, lock_key: str, expire: int = 10) -> str | None:
@@ -18,8 +26,8 @@ class RedisClient:
         acquired = await self.client.set(lock_key, token, nx=True, ex=expire)
         return token if acquired else None
 
-    async def release_lock(self, lock_key: str, token: str):
-        """Safely releases the lock only if the token matches."""
+    async def release_lock(self, lock_key: str, token: str) -> None:
+        """Safely releases the lock only if the token matches (Lua CAS script)."""
         lua_script = """
         if redis.call("get", KEYS[1]) == ARGV[1] then
             return redis.call("del", KEYS[1])
@@ -28,5 +36,6 @@ class RedisClient:
         end
         """
         await self.client.eval(lua_script, 1, lock_key, token)
+
 
 redis_client = RedisClient()
