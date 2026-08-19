@@ -8,14 +8,19 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from application.uow import SqlAlchemyUnitOfWork
+from application.uow import AbstractUnitOfWork, SqlAlchemyUnitOfWork
 from application.use_cases.create_payment import CreatePaymentUseCase
 from domain.entities.payment import PaymentEntity
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
+
+
+def get_uow() -> AbstractUnitOfWork:
+    """Dependency provider for the Unit of Work."""
+    return SqlAlchemyUnitOfWork()
 
 
 class PaymentCreateRequest(BaseModel):
@@ -39,13 +44,15 @@ class PaymentResponse(BaseModel):
     summary="Create a payment",
     description="Initiates a payment transaction through the configured gateway. Idempotent when X-Idempotency-Key is provided.",
 )
-async def create_payment(payload: PaymentCreateRequest) -> PaymentResponse:
+async def create_payment(
+    payload: PaymentCreateRequest,
+    uow: AbstractUnitOfWork = Depends(get_uow),
+) -> PaymentResponse:
     entity = PaymentEntity(
         transaction_id=payload.transaction_id,
         amount=payload.amount,
         currency=payload.currency,
     )
-    uow = SqlAlchemyUnitOfWork()
     use_case = CreatePaymentUseCase(uow)
     result: PaymentEntity = await use_case.execute(entity)
 

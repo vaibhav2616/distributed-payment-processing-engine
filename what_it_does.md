@@ -130,7 +130,10 @@ This is the maximum time a legitimate request is allowed to be in flight. If the
 
 ```python
 @router.post("/", response_model=PaymentResponse, status_code=201)
-async def create_payment(payload: PaymentCreateRequest) -> PaymentResponse:
+async def create_payment(
+    payload: PaymentCreateRequest,
+    uow: AbstractUnitOfWork = Depends(get_uow),
+) -> PaymentResponse:
 ```
 
 **What this layer does:**
