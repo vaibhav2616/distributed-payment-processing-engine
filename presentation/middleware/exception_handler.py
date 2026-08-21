@@ -96,15 +96,23 @@ async def _handle_domain_exception(request: Request, exc: DomainException) -> JS
 
 async def _handle_request_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
     errors = exc.errors()
+    # Strip non-JSON-serializable values from Pydantic v2 error context (e.g. Exception objects in 'ctx').
+    safe_errors = [{k: str(v) if k == "ctx" else v for k, v in e.items() if k != "url"} for e in errors]
     detail = "; ".join(f"{' > '.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in errors)
-    logger.warning("request_validation_error", errors=errors)
-    return _problem_response(request, status=HTTP_422_UNPROCESSABLE_ENTITY, title="Request Validation Failed", detail=detail, type_slug="request-validation-error", extra={"validation_errors": errors})
+    logger.warning("request_validation_error", detail=detail)
+    # Signal the IdempotencyMiddleware to skip caching this response so the
+    # client can correct the payload and retry with the same Idempotency-Key.
+    request.state.skip_idempotency_cache = True
+    return _problem_response(request, status=HTTP_422_UNPROCESSABLE_ENTITY, title="Request Validation Failed", detail=detail, type_slug="request-validation-error", extra={"validation_errors": safe_errors})
+
 
 async def _handle_pydantic_validation_error(request: Request, exc: PydanticValidationError) -> JSONResponse:
     errors = exc.errors()
+    safe_errors = [{k: str(v) if k == "ctx" else v for k, v in e.items() if k != "url"} for e in errors]
     detail = "; ".join(f"{' > '.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in errors)
-    logger.warning("pydantic_validation_error", errors=errors)
-    return _problem_response(request, status=HTTP_422_UNPROCESSABLE_ENTITY, title="Data Validation Failed", detail=detail, type_slug="data-validation-error", extra={"validation_errors": errors})
+    logger.warning("pydantic_validation_error", detail=detail)
+    return _problem_response(request, status=HTTP_422_UNPROCESSABLE_ENTITY, title="Data Validation Failed", detail=detail, type_slug="data-validation-error", extra={"validation_errors": safe_errors})
+
 
 async def _handle_unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
     logger.error("unhandled_exception", exc_type=type(exc).__name__, traceback=traceback.format_exc())
