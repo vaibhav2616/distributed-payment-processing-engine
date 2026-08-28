@@ -15,14 +15,14 @@ from fastapi import FastAPI
 
 from core.config import settings
 from core.logging import configure_logging
-from presentation.api.payments import router as payments_router
+from presentation.api.v1.payments import router as payments_v1_router
+from infrastructure.telemetry.context import TraceIdMiddleware
 from presentation.middleware import (
-    CorrelationIdMiddleware,
     IdempotencyMiddleware,
     register_exception_handlers,
 )
 from infrastructure.messaging.kafka_producer import kafka_producer
-from infrastructure.workers.outbox_relay import poll_outbox_events
+from application.workers.outbox_relay import poll_outbox_events
 
 
 def create_app() -> FastAPI:
@@ -42,9 +42,9 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     app.add_middleware(IdempotencyMiddleware)
-    app.add_middleware(CorrelationIdMiddleware)
+    app.add_middleware(TraceIdMiddleware)
 
-    app.include_router(payments_router, prefix="/api/v1")
+    app.include_router(payments_v1_router, prefix="/api/v1")
 
     @app.on_event("startup")
     async def startup_event() -> None:

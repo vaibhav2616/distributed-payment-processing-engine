@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from typing import Any
 
 import structlog
+from infrastructure.telemetry.redacter import mask_sensitive_data
 
 correlation_id_ctx: ContextVar[str] = ContextVar("correlation_id", default="")
 
@@ -39,6 +40,7 @@ def configure_logging(log_level: str = "INFO", log_format: str = "json") -> None
                 structlog.processors.CallsiteParameter.LINENO,
             ]
         ),
+        mask_sensitive_data,
     ]
 
     renderer: structlog.types.Processor = (

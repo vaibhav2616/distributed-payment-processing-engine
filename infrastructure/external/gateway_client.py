@@ -50,5 +50,50 @@ class PaymentGatewayClient:
                 logger.error("gateway_all_acquirers_failed", primary_error=str(primary_error), fallback_error=str(fallback_error))
                 raise PaymentGatewayException("All payment acquirers are currently unavailable.") from fallback_error
 
+    async def verify_status(self, idempotency_key: str) -> dict:
+        """
+        Query the gateway for the current status of a previously initiated charge.
+
+        This is a **read-only, idempotent** call — it never mutates state at the
+        acquirer.  The reconciler uses it to resolve zombie PENDING payments.
+
+        Expected response shapes
+        ------------------------
+        ``{"status": "success", "reference": "<gateway_ref>"}``
+            The charge was accepted and settled.  Map to CAPTURED.
+
+        ``{"status": "failed", "error": "<reason>"}``
+            The charge was definitively declined.  Map to FAILED.
+
+        ``{"status": "not_found"}``
+            The gateway has no record of this idempotency key — treat as FAILED.
+
+        Any response with a 5xx status code raises ``PaymentGatewayException``
+        (transient).  The reconciler should skip this payment and retry on the
+        next cron invocation.
+
+        Args:
+            idempotency_key: The ``PaymentAggregate.payment_id`` originally used
+                             as the gateway idempotency key during charge.
+
+        Raises:
+            PaymentGatewayException: On 5xx from the gateway.
+            httpx.TimeoutException:  On network timeout — caller skips and retries.
+        """
+        verify_timeout = httpx.Timeout(10.0, connect=3.0)
+        async with httpx.AsyncClient(timeout=verify_timeout) as client:
+            logger.info("gateway_verify_status", idempotency_key=idempotency_key)
+            response = await client.get(
+                f"{self.primary_url}/status/{idempotency_key}"
+            )
+            if response.status_code >= 500:
+                raise PaymentGatewayException(
+                    f"Gateway status check server error: {response.status_code}"
+                )
+            if response.status_code == 404:
+                return {"status": "not_found"}
+            response.raise_for_status()
+            return response.json()
+
 
 gateway_client = PaymentGatewayClient()
