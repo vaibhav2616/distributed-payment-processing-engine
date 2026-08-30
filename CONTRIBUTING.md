@@ -1,4 +1,4 @@
-# Contributing to Payment Chassis
+# Contributing to Distributed Payment Processing Engine
 
 ## Architecture Rules
 
