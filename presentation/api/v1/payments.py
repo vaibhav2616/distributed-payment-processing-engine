@@ -44,7 +44,11 @@ from application.use_cases.payment_orchestrator import (
 from application.uow import SqlAlchemyUnitOfWork
 from domain.entities.ledger import LedgerTransaction
 from domain.entities.payment import PaymentAggregate, PaymentStatus
-from domain.exceptions import DuplicateTransactionError, InvalidStateTransitionError
+from domain.exceptions import (
+    DuplicateTransactionError,
+    IdempotencyConflictException,
+    InvalidStateTransitionError,
+)
 from infrastructure.external.circuit_breaker import CircuitBreakerOpenException
 from infrastructure.external.gateway_client import gateway_client
 from presentation.api.v1.schemas import (
@@ -228,16 +232,32 @@ async def process_payment(
         reference_id=payload.reference_id,
     )
 
+    idempotency_key = (
+        request.headers.get("Idempotency-Key")
+        or request.headers.get("X-Idempotency-Key")
+        or payload.reference_id
+    )
+
     command = ProcessPaymentCommand(
         amount=payload.amount,          # Decimal — validated by schema
         currency=payload.currency,
         source=payload.source_token,
         transaction_id=payload.reference_id,
+        idempotency_key=idempotency_key,
         correlation_id=correlation_id,
     )
 
     try:
         result: ProcessPaymentResult = await orchestrator.process_payment(command)
+    except IdempotencyConflictException as exc:
+        log.warning("api.idempotency_conflict", detail=exc.detail)
+        return _problem_detail_response(
+            type_="idempotency-conflict",
+            title="Idempotency Conflict",
+            http_status=status.HTTP_409_CONFLICT,
+            detail=exc.detail,
+            instance=f"/api/v1/payments/{payload.reference_id}",
+        )
     except CircuitBreakerOpenException as exc:
         log.warning("api.circuit_breaker_open", detail=str(exc))
         return JSONResponse(

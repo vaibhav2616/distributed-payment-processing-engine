@@ -90,6 +90,22 @@ class IdempotentRequestError(DomainException):
     """
 
 
+class IdempotencyConflictException(DomainException):
+    """
+    Raised when a database unique constraint violation occurs for an idempotency key,
+    indicating that a duplicate charge was attempted concurrently or replayed
+    after Redis eviction or restart.
+    """
+
+    def __init__(
+        self,
+        message: str = "Duplicate idempotency key detected",
+        *,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(message, detail=detail or message)
+
+
 class LedgerImbalanceError(DomainException):
     """
     Raised by ``LedgerTransaction.verify_balance()`` when the sum of all

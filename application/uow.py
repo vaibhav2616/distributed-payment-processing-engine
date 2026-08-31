@@ -56,14 +56,19 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        if exc_type:
-            await self.rollback()
-        else:
-            await self.commit()
-        await self.session.close()
+        try:
+            if exc_type:
+                await self.rollback()
+            else:
+                await self.commit()
+        finally:
+            if self.session:
+                await self.session.close()
 
     async def commit(self) -> None:
-        await self.session.commit()
+        if self.session and self.session.in_transaction():
+            await self.session.commit()
 
     async def rollback(self) -> None:
-        await self.session.rollback()
+        if self.session and self.session.in_transaction():
+            await self.session.rollback()

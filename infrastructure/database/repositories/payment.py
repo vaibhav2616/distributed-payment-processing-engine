@@ -21,6 +21,7 @@ class SqlAlchemyPaymentRepository(AbstractPaymentRepository):
         return PaymentModel(
             payment_id=entity.payment_id,
             transaction_id=entity.transaction_id,
+            idempotency_key=entity.idempotency_key,
             amount=entity.amount,          # Decimal → Numeric(18,4) column directly
             currency=entity.currency,
             status=entity.status,          # PaymentStatus → Enum column directly
@@ -36,6 +37,7 @@ class SqlAlchemyPaymentRepository(AbstractPaymentRepository):
         return PaymentAggregate(
             payment_id=model.payment_id,
             transaction_id=model.transaction_id,
+            idempotency_key=model.idempotency_key,
             amount=model.amount,           # Numeric column → Decimal directly
             currency=model.currency,
             status=model.status,           # Enum column → PaymentStatus directly
@@ -68,6 +70,12 @@ class SqlAlchemyPaymentRepository(AbstractPaymentRepository):
 
     async def get_by_payment_id(self, payment_id: str) -> PaymentAggregate | None:
         stmt = select(PaymentModel).where(PaymentModel.payment_id == payment_id)
+        result = await self._session.execute(stmt)
+        model = result.scalar_one_or_none()
+        return self._to_entity(model) if model else None
+
+    async def get_by_idempotency_key(self, idempotency_key: str) -> PaymentAggregate | None:
+        stmt = select(PaymentModel).where(PaymentModel.idempotency_key == idempotency_key)
         result = await self._session.execute(stmt)
         model = result.scalar_one_or_none()
         return self._to_entity(model) if model else None
@@ -166,6 +174,7 @@ class SqlAlchemyPaymentRepository(AbstractPaymentRepository):
                 (PaymentModel.payment_id == reference_id)
                 | (PaymentModel.gateway_ref == reference_id)
                 | (PaymentModel.transaction_id == reference_id)
+                | (PaymentModel.idempotency_key == reference_id)
             )
             .with_for_update(nowait=True)
         )

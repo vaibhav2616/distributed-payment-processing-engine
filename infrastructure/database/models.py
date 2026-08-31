@@ -95,6 +95,17 @@ class PaymentModel(Base):
     )
 
     # ------------------------------------------------------------------
+    # Database Anchor for Dual-Tier Idempotency
+    # ------------------------------------------------------------------
+    idempotency_key: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        unique=True,
+        index=True,
+        comment="Client idempotency key with strict database-level unique constraint.",
+    )
+
+    # ------------------------------------------------------------------
     # Amount — Numeric(18, 4) for exact decimal storage
     # ------------------------------------------------------------------
     amount: Mapped[sa.Numeric] = mapped_column(

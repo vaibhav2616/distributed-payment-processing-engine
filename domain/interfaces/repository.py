@@ -36,6 +36,9 @@ class AbstractPaymentRepository(AbstractRepository[PaymentAggregate]):
     async def get_by_payment_id(self, payment_id: str) -> PaymentAggregate | None: ...
 
     @abstractmethod
+    async def get_by_idempotency_key(self, idempotency_key: str) -> PaymentAggregate | None: ...
+
+    @abstractmethod
     async def exists(self, transaction_id: str) -> bool: ...
 
     @abstractmethod

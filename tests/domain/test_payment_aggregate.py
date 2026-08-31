@@ -91,6 +91,17 @@ class TestPaymentAggregateCreate:
     def test_factory_accepts_custom_transaction_id(self):
         p = PaymentAggregate.create(amount="10.00", currency="USD", transaction_id="TXN-001")
         assert p.transaction_id == "TXN-001"
+        assert p.idempotency_key == "TXN-001"
+
+    def test_factory_accepts_custom_idempotency_key(self):
+        p = PaymentAggregate.create(
+            amount="10.00",
+            currency="USD",
+            transaction_id="TXN-001",
+            idempotency_key="IDEMP-KEY-999",
+        )
+        assert p.transaction_id == "TXN-001"
+        assert p.idempotency_key == "IDEMP-KEY-999"
 
     def test_factory_raises_on_zero_amount(self):
         with pytest.raises(ValueError, match="positive"):

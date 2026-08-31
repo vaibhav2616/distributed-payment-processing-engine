@@ -141,6 +141,7 @@ class PaymentAggregate:
         transaction_id  External idempotency / correlation handle.
         amount          Gross amount in the specified currency (Decimal).
         currency        ISO 4217 currency code.
+        idempotency_key Client idempotency key anchored in PostgreSQL.
         status          Current lifecycle state.
         gateway_ref     Acquirer reference returned on authorisation.
         failure_reason  Human-readable failure reason when status == FAILED.
@@ -154,6 +155,7 @@ class PaymentAggregate:
     transaction_id: str
     amount: Decimal
     currency: str
+    idempotency_key: str = ""
     status: PaymentStatus = PaymentStatus.PENDING
     gateway_ref: str | None = None
     failure_reason: str | None = None
@@ -171,6 +173,8 @@ class PaymentAggregate:
             raise ValueError("payment_id must not be empty.")
         if not self.transaction_id:
             raise ValueError("transaction_id must not be empty.")
+        if not self.idempotency_key:
+            self.idempotency_key = self.transaction_id
         # Coerce and validate amount
         try:
             self.amount = Decimal(str(self.amount)).quantize(Decimal("0.01"))
@@ -192,6 +196,7 @@ class PaymentAggregate:
         currency: str,
         transaction_id: str | None = None,
         payment_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> "PaymentAggregate":
         """
         Factory method: creates a new PaymentAggregate in PENDING state and
@@ -201,9 +206,12 @@ class PaymentAggregate:
         from domain.events.payment_events import PaymentInitiated
 
         now = datetime.now(timezone.utc)
+        resolved_tx_id = transaction_id or str(uuid.uuid4())
+        resolved_idem_key = idempotency_key or resolved_tx_id
         aggregate = cls(
             payment_id=payment_id or str(uuid.uuid4()),
-            transaction_id=transaction_id or str(uuid.uuid4()),
+            transaction_id=resolved_tx_id,
+            idempotency_key=resolved_idem_key,
             amount=Decimal(str(amount)),
             currency=currency,
             status=PaymentStatus.PENDING,

@@ -34,6 +34,7 @@ from domain.exceptions import (
     DuplicateTransactionError,
     EntityNotFoundError,
     ExternalServiceError,
+    IdempotencyConflictException,
     MessagingError,
     PaymentGatewayError,
     ValidationError as DomainValidationError,
@@ -75,6 +76,10 @@ async def _handle_domain_validation_error(request: Request, exc: DomainValidatio
 async def _handle_duplicate_transaction(request: Request, exc: DuplicateTransactionError) -> JSONResponse:
     logger.warning("duplicate_transaction_error", detail=exc.detail)
     return _problem_response(request, status=HTTP_409_CONFLICT, title="Duplicate Transaction", detail=exc.detail, type_slug="duplicate-transaction")
+
+async def _handle_idempotency_conflict(request: Request, exc: IdempotencyConflictException) -> JSONResponse:
+    logger.warning("idempotency_conflict_error", detail=exc.detail)
+    return _problem_response(request, status=HTTP_409_CONFLICT, title="Idempotency Conflict", detail=exc.detail, type_slug="idempotency-conflict")
 
 async def _handle_concurrent_update(request: Request, exc: ConcurrentUpdateException) -> JSONResponse:
     logger.warning("concurrent_update_error", detail=exc.detail)
@@ -139,6 +144,7 @@ async def _handle_unhandled_exception(request: Request, exc: Exception) -> JSONR
 
 def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(CircuitBreakerOpenException, _handle_circuit_breaker_open)   # type: ignore[arg-type]
+    app.add_exception_handler(IdempotencyConflictException, _handle_idempotency_conflict) # type: ignore[arg-type]
     app.add_exception_handler(DuplicateTransactionError, _handle_duplicate_transaction)   # type: ignore[arg-type]
     app.add_exception_handler(ConcurrentUpdateException, _handle_concurrent_update)       # type: ignore[arg-type]
     app.add_exception_handler(EntityNotFoundError, _handle_entity_not_found)              # type: ignore[arg-type]

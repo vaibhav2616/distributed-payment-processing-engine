@@ -282,3 +282,141 @@ async def test_circuit_breaker_open_critical_invariant_no_pending_in_db():
     # 2. No gateway charge call was made
     mock_gateway.charge.assert_not_called()
 
+
+def test_process_payment_409_idempotency_conflict():
+    """
+    Test that an IdempotencyConflictException returns 409 Conflict with Problem Details.
+    """
+    from domain.exceptions import IdempotencyConflictException
+
+    mock_orch = MockOrchestrator()
+    mock_orch.process_payment.side_effect = IdempotencyConflictException(
+        "Payment with idempotency key 'idem_duplicate' already exists.",
+        detail="Duplicate idempotency key 'idem_duplicate' detected: payment is already processed or in-flight.",
+    )
+
+    app.dependency_overrides[get_orchestrator] = lambda: mock_orch
+
+    payload = {
+        "amount": "150.00",
+        "currency": "USD",
+        "source_token": "tok_visa",
+        "reference_id": "order_777",
+    }
+    headers = {"Idempotency-Key": "idem_duplicate"}
+
+    response = client.post("/api/v1/payments/", json=payload, headers=headers)
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert response.headers["content-type"] == "application/problem+json"
+    data = response.json()
+    assert "idempotency-conflict" in data["type"]
+    assert data["status"] == 409
+    assert data["title"] == "Idempotency Conflict"
+    assert "Duplicate idempotency key" in data["detail"]
+
+
+def test_process_payment_extracts_idempotency_key_header():
+    """
+    Test that the router extracts Idempotency-Key from headers and passes it to the orchestrator command.
+    """
+    from application.use_cases.payment_orchestrator import ProcessPaymentCommand
+
+    payment_id = str(uuid.uuid4())
+    mock_result = ProcessPaymentResult(
+        payment_id=payment_id,
+        transaction_id="tx_order_999",
+        status=PaymentStatus.CAPTURED,
+        gateway_ref="gw_123",
+        ledger_txn_id="ltx_456",
+        reconciler_needed=False,
+    )
+    mock_aggregate = PaymentAggregate(
+        payment_id=payment_id,
+        transaction_id="tx_order_999",
+        idempotency_key="custom-idem-header-value",
+        amount=Decimal("150.00"),
+        currency="USD",
+        status=PaymentStatus.CAPTURED,
+        gateway_ref="gw_123",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    captured_command = []
+
+    async def mock_process(cmd: ProcessPaymentCommand):
+        captured_command.append(cmd)
+        return mock_result
+
+    mock_orch = MockOrchestrator()
+    mock_orch.process_payment = AsyncMock(side_effect=mock_process)
+
+    app.dependency_overrides[get_orchestrator] = lambda: mock_orch
+    app.dependency_overrides[get_uow_factory] = lambda: lambda: MockUoW(mock_aggregate)
+
+    payload = {
+        "amount": "150.00",
+        "currency": "USD",
+        "source_token": "tok_visa",
+        "reference_id": "tx_order_999",
+    }
+    headers = {"Idempotency-Key": "custom-idem-header-value"}
+
+    response = client.post("/api/v1/payments/", json=payload, headers=headers)
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 201
+    assert len(captured_command) == 1
+    assert captured_command[0].idempotency_key == "custom-idem-header-value"
+    assert captured_command[0].transaction_id == "tx_order_999"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_phase1_integrity_error_raises_idempotency_conflict():
+    """
+    The Safety Net test:
+    When a database driver's IntegrityError (Unique Violation) occurs during Phase 1 commit,
+    PaymentOrchestrator catches it and raises IdempotencyConflictException.
+    """
+    from unittest.mock import MagicMock
+    from sqlalchemy.exc import IntegrityError
+    from application.use_cases.payment_orchestrator import PaymentOrchestrator, ProcessPaymentCommand
+    from domain.exceptions import IdempotencyConflictException
+
+    mock_gateway = AsyncMock()
+    mock_gateway.circuit_breaker = None
+
+    mock_uow_instance = AsyncMock()
+    mock_uow_instance.payments = AsyncMock()
+    mock_uow_instance.outbox = AsyncMock()
+    # Simulate DB unique constraint violation during commit
+    mock_uow_instance.commit.side_effect = IntegrityError(
+        "duplicate key value violates unique constraint",
+        params={},
+        orig=Exception("unique constraint"),
+    )
+    mock_uow_factory = MagicMock(return_value=mock_uow_instance)
+    mock_uow_instance.__aenter__.return_value = mock_uow_instance
+
+    orchestrator = PaymentOrchestrator(uow=mock_uow_factory, gateway=mock_gateway)
+
+    command = ProcessPaymentCommand(
+        amount=Decimal("150.00"),
+        currency="USD",
+        source="tok_visa",
+        transaction_id="order_conflict",
+        idempotency_key="idem_conflict_key",
+    )
+
+    with pytest.raises(IdempotencyConflictException) as exc_info:
+        await orchestrator.process_payment(command)
+
+    assert "idem_conflict_key" in str(exc_info.value)
+    mock_uow_instance.rollback.assert_called_once()
+    mock_gateway.charge.assert_not_called()
+
+

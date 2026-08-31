@@ -66,13 +66,20 @@ import structlog
 
 from domain.entities.ledger import LedgerEntry, LedgerTransaction
 from domain.entities.payment import PaymentAggregate, PaymentStatus
-from domain.exceptions import PaymentGatewayError
+from domain.exceptions import IdempotencyConflictException, PaymentGatewayError
 from infrastructure.telemetry.context import get_current_trace_id
 from infrastructure.external.circuit_breaker import CircuitBreakerOpenException
 from infrastructure.external.gateway_client import (
     PaymentGatewayClient,
     PaymentGatewayException,
 )
+from sqlalchemy.exc import IntegrityError
+
+try:
+    import asyncpg
+    _INTEGRITY_ERRORS = (IntegrityError, asyncpg.exceptions.IntegrityConstraintViolationError)
+except ImportError:  # pragma: no cover
+    _INTEGRITY_ERRORS = (IntegrityError,)
 
 try:
     import httpx
@@ -103,6 +110,7 @@ class ProcessPaymentCommand:
         currency        ISO 4217 currency code (e.g. ``"INR"``).
         source          Tokenised payment source (e.g. card token from the SDK).
         transaction_id  Merchant-supplied idempotency handle.
+        idempotency_key External idempotency key anchored in PostgreSQL.
         correlation_id  Distributed trace ID propagated from the HTTP layer.
     """
 
@@ -110,6 +118,7 @@ class ProcessPaymentCommand:
     currency: str
     source: str
     transaction_id: str
+    idempotency_key: str = ""
     correlation_id: str = ""
 
     def __post_init__(self) -> None:
@@ -120,6 +129,8 @@ class ProcessPaymentCommand:
             )
         if self.amount <= Decimal("0"):
             raise ValueError("amount must be strictly positive.")
+        if not self.idempotency_key:
+            object.__setattr__(self, "idempotency_key", self.transaction_id)
 
 
 @dataclass(frozen=True)
@@ -218,6 +229,7 @@ class PaymentOrchestrator:
             amount=command.amount,
             currency=command.currency,
             transaction_id=command.transaction_id,
+            idempotency_key=command.idempotency_key,
         )
 
         async with self._uow() as uow:
@@ -232,10 +244,26 @@ class PaymentOrchestrator:
                     "currency": payment.currency,
                     "status": payment.status.value,
                     "reference_id": payment.transaction_id,
+                    "idempotency_key": payment.idempotency_key,
                     "trace_id": get_current_trace_id(),
                 }),
             )
-            # commit() is called by __aexit__ on clean exit
+            # The Safety Net: Catch database driver's unique constraint integrity error.
+            # If caught, Redis lock failed/bypassed and duplicate charge was attempted.
+            try:
+                await uow.commit()
+            except _INTEGRITY_ERRORS as exc:
+                if hasattr(uow, "rollback"):
+                    await uow.rollback()
+                log.warning(
+                    "payment_orchestrator.phase1.idempotency_conflict",
+                    idempotency_key=payment.idempotency_key,
+                    error=str(exc),
+                )
+                raise IdempotencyConflictException(
+                    f"Payment with idempotency key '{payment.idempotency_key}' already exists.",
+                    detail=f"Duplicate idempotency key '{payment.idempotency_key}' detected: payment is already processed or in-flight.",
+                ) from exc
         # Session is closed here.  payment is now durable in PENDING state.
 
         log.info("payment_orchestrator.phase1.committed", payment_id=payment.payment_id)
