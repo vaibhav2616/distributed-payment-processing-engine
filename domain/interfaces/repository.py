@@ -85,3 +85,18 @@ class AbstractPaymentRepository(AbstractRepository[PaymentAggregate]):
         released when the caller commits or rolls back.
         """
         ...
+
+    @abstractmethod
+    async def lock_by_reference_id(
+        self,
+        reference_id: str,
+    ) -> PaymentAggregate | None:
+        """
+        Acquire a SELECT ... FOR UPDATE NOWAIT lock on a single payment row
+        by reference_id (gateway reference, transaction_id, or payment_id).
+
+        Raises:
+            ConcurrentUpdateException: If the row is currently locked by another process.
+        """
+        ...
+

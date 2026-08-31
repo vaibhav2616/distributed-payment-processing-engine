@@ -112,6 +112,13 @@ class PaymentModel(Base):
         comment="ISO 4217 three-letter currency code.",
     )
 
+    amount_refunded: Mapped[Decimal] = mapped_column(
+        Numeric(precision=12, scale=2),
+        nullable=False,
+        default=Decimal("0.00"),
+        comment="Total amount refunded so far. Cannot exceed amount.",
+    )
+
     # ------------------------------------------------------------------
     # Status — DB-enforced ENUM, bound to PaymentStatus domain type
     # ------------------------------------------------------------------

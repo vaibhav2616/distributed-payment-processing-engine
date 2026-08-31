@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from application.use_cases.payment_orchestrator import ProcessPaymentResult
 from domain.entities.payment import PaymentAggregate, PaymentStatus
+from infrastructure.external.circuit_breaker import CircuitBreakerOpenException
 from main import app
 from presentation.api.v1.payments import get_orchestrator, get_uow_factory
 
@@ -187,3 +188,82 @@ def test_process_payment_422_declined():
     assert data["title"] == "Gateway Rejected"
     assert data["status"] == 422
     assert data["instance"] == f"/api/v1/payments/{payment_id}"
+
+
+def test_process_payment_503_circuit_breaker_open():
+    """
+    Test that an open circuit breaker returns 503 Service Unavailable with Retry-After: 60 header.
+    """
+    mock_orch = MockOrchestrator()
+    mock_orch.process_payment.side_effect = CircuitBreakerOpenException(
+        "Payment gateway circuit breaker is OPEN. Upstream acquirer is unavailable.",
+        retry_after=60,
+    )
+
+    app.dependency_overrides[get_orchestrator] = lambda: mock_orch
+
+    payload = {
+        "amount": "150.00",
+        "currency": "USD",
+        "source_token": "tok_visa",
+        "reference_id": "order_777",
+    }
+    headers = {"Idempotency-Key": str(uuid.uuid4())}
+
+    response = client.post("/api/v1/payments/", json=payload, headers=headers)
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.headers.get("Retry-After") == "60"
+    data = response.json()
+    assert data["status"] == 503
+    assert "circuit breaker is OPEN" in data["detail"]
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_open_critical_invariant_no_pending_in_db():
+    """
+    Critical invariant test:
+    When the gateway circuit breaker is OPEN, PaymentOrchestrator must fast-fail
+    without saving the payment as PENDING in the database.
+    """
+    from unittest.mock import MagicMock
+    from application.use_cases.payment_orchestrator import PaymentOrchestrator, ProcessPaymentCommand
+    from infrastructure.external.circuit_breaker import RedisCircuitBreaker
+
+    class MockOpenRedis:
+        async def get(self, key: str) -> str | None:
+            if "open" in key:
+                return "1"
+            return None
+
+    mock_breaker = RedisCircuitBreaker(redis_client=MockOpenRedis(), name="test_gw")
+    mock_gateway = AsyncMock()
+    mock_gateway.circuit_breaker = mock_breaker
+
+    mock_uow_instance = AsyncMock()
+    mock_uow_instance.payments = AsyncMock()
+    mock_uow_instance.outbox = AsyncMock()
+    mock_uow_factory = MagicMock(return_value=mock_uow_instance)
+    mock_uow_instance.__aenter__.return_value = mock_uow_instance
+
+    orchestrator = PaymentOrchestrator(uow=mock_uow_factory, gateway=mock_gateway)
+
+    command = ProcessPaymentCommand(
+        amount=Decimal("150.00"),
+        currency="USD",
+        source="tok_visa",
+        transaction_id="order_cb_test",
+    )
+
+    with pytest.raises(CircuitBreakerOpenException):
+        await orchestrator.process_payment(command)
+
+    # CRITICAL INVARIANT ASSERTIONS:
+    # 1. No UoW transaction was committed to persist PENDING payment
+    mock_uow_instance.payments.add.assert_not_called()
+    mock_uow_instance.outbox.enqueue.assert_not_called()
+    # 2. No gateway charge call was made
+    mock_gateway.charge.assert_not_called()
+

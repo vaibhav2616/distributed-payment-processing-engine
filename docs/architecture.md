@@ -123,6 +123,67 @@ HTTP 202 Accepted  (PENDING — reconciler will resolve)
 
 ---
 
+## Distributed Circuit Breaker (`infrastructure/external/circuit_breaker.py`)
+
+To prevent cascading network failures across distributed pods, external calls to `PaymentGatewayInterface` (`charge`, `verify_status`) are protected by `RedisCircuitBreaker`.
+
+### Circuit States
+
+```
+         ┌─────────────────────────┐
+         │         CLOSED          │ (Normal Operation)
+         │  consecutive_failures < 5│
+         └───────────┬─────────────┘
+                     │ 5 consecutive network failures (5xx / timeouts)
+                     ▼
+         ┌─────────────────────────┐
+         │          OPEN           │ (Fast Failure Mode)
+         │     Redis TTL = 60s     │ Immediate CircuitBreakerOpenException
+         └───────────┬─────────────┘
+                     │ TTL expires (60s cool-off)
+                     ▼
+         ┌─────────────────────────┐
+         │        HALF-OPEN        │ (Canary / Recovery Testing)
+         │  Single probe request   │
+         └───┬─────────────────┬───┘
+             │ Success         │ Failure (5xx / timeout)
+             ▼                 ▼
+          CLOSED              OPEN (fresh 60s TTL)
+```
+
+### Invariants & Guarantees
+
+1. **Failure Threshold**: 5 consecutive network timeouts or 5xx server errors transition state to `OPEN`.
+2. **Cool-off Window**: 60 seconds Redis TTL on `OPEN`.
+3. **Half-Open Single Probe**: Exactly one request is allowed through to test upstream health. Concurrent requests fast-fail with `CircuitBreakerOpenException`.
+4. **4xx Domain Safety**: HTTP 4xx responses (card declined, insufficient funds) are valid business outcomes and are **never** counted as failures.
+5. **No Zombie PENDING Records**: The `PaymentOrchestrator` pre-flights the circuit breaker before opening database transactions. If the breaker is `OPEN`, the request is rejected immediately with `503 Service Unavailable` (`Retry-After: 60`), preventing database exhaustion.
+
+---
+
+## Asynchronous Webhook Receiver (`presentation/api/v1/webhooks.py`)
+
+Handles asynchronous payment notifications from external gateways (e.g. Stripe, Adyen).
+
+### Security & Invariants
+
+1. **Replay Attack Mitigation & Dynamic HMAC (`verify_webhook_signature`)**:
+   - Parses timestamp from `X-Gateway-Timestamp` or `t=` signature parameter.
+   - Enforces a **5-minute (300 seconds)** tolerance window against current server time; older timestamps are rejected with `401 Unauthorized` (`Replay Attack detected`).
+   - Dynamic HMAC: signature is verified against `f"{timestamp}.{raw_body.decode()}"` using constant-time comparison.
+2. **Concurrency Control (`SELECT FOR UPDATE NOWAIT`)**:
+   - Locks the target payment row immediately inside `uow.begin()`.
+   - If locked by another worker (e.g., Reconciler), raises `ConcurrentUpdateException` and returns `409 Conflict`, signaling the gateway to retry with exponential backoff.
+3. **Distributed Split-Brain Guard & True Idempotency**:
+   - If the payment was already resolved (no longer `PENDING`), compares `payment.status` to incoming `webhook_status`.
+   - **True Idempotency**: If `payment.status == webhook_status`, safely rolls back and returns `200 OK`.
+   - **Distributed Split-Brain**: If `payment.status != webhook_status`, rolls back without applying the transition, logs a **CRITICAL** security alert detailing `payment_id`, `db_status`, and `webhook_status`, and returns `200 OK` (to prevent gateway retry loops) while flagging for immediate manual engineering review.
+4. **Zero-Sum Ledger & Outbox Execution**:
+   - On `CAPTURED`: creates and verifies a balanced `LedgerTransaction` and emits `payment.captured` event.
+   - On `FAILED`: marks payment failed and emits `payment.failed` event.
+
+---
+
 ## Idempotency Contract
 
 ### Rules

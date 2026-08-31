@@ -68,6 +68,7 @@ from domain.entities.ledger import LedgerEntry, LedgerTransaction
 from domain.entities.payment import PaymentAggregate, PaymentStatus
 from domain.exceptions import PaymentGatewayError
 from infrastructure.telemetry.context import get_current_trace_id
+from infrastructure.external.circuit_breaker import CircuitBreakerOpenException
 from infrastructure.external.gateway_client import (
     PaymentGatewayClient,
     PaymentGatewayException,
@@ -200,6 +201,15 @@ class PaymentOrchestrator:
         )
 
         # ==================================================================
+        # CIRCUIT BREAKER GUARD — Fast-fail before opening DB transaction
+        # ==================================================================
+        # Critical invariant: Do not save the payment as PENDING in the database
+        # if the circuit breaker is open. Reject the request entirely to prevent
+        # filling our database with zombie records during a prolonged upstream outage.
+        if hasattr(self._gateway, "circuit_breaker") and self._gateway.circuit_breaker is not None:
+            await self._gateway.circuit_breaker.ensure_available()
+
+        # ==================================================================
         # PHASE 1 — Local State Initialisation (one atomic transaction)
         # ==================================================================
         log.info("payment_orchestrator.phase1.start")
@@ -239,7 +249,7 @@ class PaymentOrchestrator:
         is_transient_failure = False
 
         try:
-            gateway_response = await self._gateway.charge_with_fallback(
+            gateway_response = await self._gateway.charge(
                 payload={
                     "amount": str(payment.amount),       # Decimal serialised as str
                     "currency": payment.currency,
@@ -252,6 +262,16 @@ class PaymentOrchestrator:
                 payment_id=payment.payment_id,
                 gateway_ref=gateway_response.get("reference"),
             )
+
+        except CircuitBreakerOpenException as exc:
+            # Circuit breaker is OPEN: do not treat as transient PENDING!
+            # Re-raise so presentation layer returns 503 Service Unavailable with Retry-After: 60.
+            log.warning(
+                "payment_orchestrator.phase2.circuit_breaker_open",
+                payment_id=payment.payment_id,
+                error=str(exc),
+            )
+            raise
 
         except (*_NETWORK_ERRORS, PaymentGatewayException) as exc:
             # Transient failure: timeout or 5xx after all retries.

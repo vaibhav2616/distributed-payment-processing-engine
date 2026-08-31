@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
+    WEBHOOK_SECRET: str = "test_webhook_secret_key"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

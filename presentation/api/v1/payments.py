@@ -45,6 +45,7 @@ from application.uow import SqlAlchemyUnitOfWork
 from domain.entities.ledger import LedgerTransaction
 from domain.entities.payment import PaymentAggregate, PaymentStatus
 from domain.exceptions import DuplicateTransactionError, InvalidStateTransitionError
+from infrastructure.external.circuit_breaker import CircuitBreakerOpenException
 from infrastructure.external.gateway_client import gateway_client
 from presentation.api.v1.schemas import (
     CreatePaymentRequest,
@@ -184,10 +185,12 @@ def _problem_detail_response(
         "- `202 Accepted` — gateway timed out; poll `GET /payments/{id}`.\n"
         "- `422 Unprocessable Entity` — card declined (RFC 7807 body).\n"
         "- `409 Conflict` — duplicate `Idempotency-Key`.\n"
+        "- `503 Service Unavailable` — gateway circuit breaker is OPEN.\n"
     ),
     responses={
         202: {"description": "Accepted — gateway unreachable; poll GET endpoint."},
         409: {"description": "Conflict — duplicate Idempotency-Key."},
+        503: {"description": "Service Unavailable — gateway circuit breaker is OPEN."},
         422: {
             "description": "Unprocessable — gateway hard decline.",
             "content": {
@@ -235,6 +238,18 @@ async def process_payment(
 
     try:
         result: ProcessPaymentResult = await orchestrator.process_payment(command)
+    except CircuitBreakerOpenException as exc:
+        log.warning("api.circuit_breaker_open", detail=str(exc))
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "60"},
+            content={
+                "type": "https://api.example.com/errors/service-unavailable",
+                "title": "Service Unavailable",
+                "status": 503,
+                "detail": "Payment gateway circuit breaker is OPEN. Upstream acquirer is unavailable.",
+            },
+        )
     except DuplicateTransactionError as exc:
         log.warning("api.duplicate_transaction", detail=exc.detail)
         raise HTTPException(

@@ -29,6 +29,7 @@ HTTP_502_BAD_GATEWAY = http_status.HTTP_502_BAD_GATEWAY
 HTTP_503_SERVICE_UNAVAILABLE = http_status.HTTP_503_SERVICE_UNAVAILABLE
 
 from domain.exceptions import (
+    ConcurrentUpdateException,
     DomainException,
     DuplicateTransactionError,
     EntityNotFoundError,
@@ -37,6 +38,7 @@ from domain.exceptions import (
     PaymentGatewayError,
     ValidationError as DomainValidationError,
 )
+from infrastructure.external.circuit_breaker import CircuitBreakerOpenException
 
 logger = structlog.get_logger(__name__)
 _TYPE_BASE = "https://api.example.com/errors"
@@ -74,6 +76,10 @@ async def _handle_duplicate_transaction(request: Request, exc: DuplicateTransact
     logger.warning("duplicate_transaction_error", detail=exc.detail)
     return _problem_response(request, status=HTTP_409_CONFLICT, title="Duplicate Transaction", detail=exc.detail, type_slug="duplicate-transaction")
 
+async def _handle_concurrent_update(request: Request, exc: ConcurrentUpdateException) -> JSONResponse:
+    logger.warning("concurrent_update_error", detail=exc.detail)
+    return _problem_response(request, status=HTTP_409_CONFLICT, title="Concurrent Update Conflict", detail=exc.detail, type_slug="concurrent-update-conflict")
+
 async def _handle_entity_not_found(request: Request, exc: EntityNotFoundError) -> JSONResponse:
     logger.info("entity_not_found", entity_type=exc.entity_type, identifier=exc.identifier)
     return _problem_response(request, status=HTTP_404_NOT_FOUND, title="Entity Not Found", detail=exc.detail, type_slug="entity-not-found")
@@ -85,6 +91,18 @@ async def _handle_payment_gateway_error(request: Request, exc: PaymentGatewayErr
 async def _handle_external_service_error(request: Request, exc: ExternalServiceError) -> JSONResponse:
     logger.error("external_service_error", detail=exc.detail)
     return _problem_response(request, status=HTTP_503_SERVICE_UNAVAILABLE, title="External Service Unavailable", detail=exc.detail, type_slug="external-service-error")
+
+async def _handle_circuit_breaker_open(request: Request, exc: CircuitBreakerOpenException) -> JSONResponse:
+    logger.warning("circuit_breaker_open", detail=str(exc))
+    resp = _problem_response(
+        request,
+        status=HTTP_503_SERVICE_UNAVAILABLE,
+        title="Service Unavailable",
+        detail="Payment gateway circuit breaker is OPEN. Upstream acquirer is unavailable.",
+        type_slug="circuit-breaker-open",
+    )
+    resp.headers["Retry-After"] = str(getattr(exc, "retry_after", 60))
+    return resp
 
 async def _handle_messaging_error(request: Request, exc: MessagingError) -> JSONResponse:
     logger.error("messaging_error", detail=exc.detail)
@@ -120,7 +138,9 @@ async def _handle_unhandled_exception(request: Request, exc: Exception) -> JSONR
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+    app.add_exception_handler(CircuitBreakerOpenException, _handle_circuit_breaker_open)   # type: ignore[arg-type]
     app.add_exception_handler(DuplicateTransactionError, _handle_duplicate_transaction)   # type: ignore[arg-type]
+    app.add_exception_handler(ConcurrentUpdateException, _handle_concurrent_update)       # type: ignore[arg-type]
     app.add_exception_handler(EntityNotFoundError, _handle_entity_not_found)              # type: ignore[arg-type]
     app.add_exception_handler(DomainValidationError, _handle_domain_validation_error)     # type: ignore[arg-type]
     app.add_exception_handler(PaymentGatewayError, _handle_payment_gateway_error)         # type: ignore[arg-type]

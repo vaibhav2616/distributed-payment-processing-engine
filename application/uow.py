@@ -27,6 +27,9 @@ class AbstractUnitOfWork(ABC):
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None: ...
 
     @abstractmethod
+    async def begin(self) -> None: ...
+
+    @abstractmethod
     async def commit(self) -> None: ...
 
     @abstractmethod
@@ -37,12 +40,19 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
     def __init__(self) -> None:
         self.session_maker = async_session_maker
         self.gateway = gateway_client
+        self.session = None
+
+    async def begin(self) -> None:
+        if self.session is None:
+            self.session = self.session_maker()
+            self.payments = SqlAlchemyPaymentRepository(self.session)
+            self.outbox = SqlAlchemyOutboxRepository(self.session)
+            self.ledger = SqlAlchemyLedgerRepository(self.session)
+        if not self.session.in_transaction():
+            await self.session.begin()
 
     async def __aenter__(self) -> "SqlAlchemyUnitOfWork":
-        self.session = self.session_maker()
-        self.payments = SqlAlchemyPaymentRepository(self.session)
-        self.outbox = SqlAlchemyOutboxRepository(self.session)
-        self.ledger = SqlAlchemyLedgerRepository(self.session)
+        await self.begin()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:

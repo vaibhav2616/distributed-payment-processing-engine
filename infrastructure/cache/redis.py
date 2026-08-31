@@ -20,6 +20,12 @@ class RedisClient:
     async def set(self, key: str, value: str, expire: int = 300) -> None:
         await self.client.set(key, value, ex=expire)
 
+    async def incr(self, key: str) -> int:
+        return await self.client.incr(key)
+
+    async def delete(self, *keys: str) -> int:
+        return await self.client.delete(*keys)
+
     async def acquire_lock(self, lock_key: str, expire: int = 10) -> str | None:
         """Acquires an atomic distributed lock. Returns a unique token if successful, else None."""
         token = str(uuid.uuid4())

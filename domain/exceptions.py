@@ -16,6 +16,15 @@ class ValidationError(DomainException):
     """Raised when a domain invariant or value-object constraint is violated."""
 
 
+class InvalidRefundAmountError(ValidationError):
+    """Raised when the requested refund amount exceeds the captured amount minus already refunded amount."""
+    def __init__(self, requested: str, max_allowed: str) -> None:
+        super().__init__(
+            f"Cannot refund {requested}: exceeds available amount {max_allowed}.",
+            detail=f"Refund amount {requested} exceeds the maximum allowed refund of {max_allowed}."
+        )
+
+
 class DuplicateTransactionError(DomainException):
     """Raised when a transaction with the same ID already exists."""
 
@@ -32,6 +41,12 @@ class EntityNotFoundError(DomainException):
 
 class ExternalServiceError(DomainException):
     """Raised when a downstream external service call fails irrecoverably."""
+
+
+class GatewayDeclineError(DomainException):
+    """Raised when the payment gateway definitively rejects a transaction (e.g. 4xx error)."""
+    def __init__(self, message: str) -> None:
+        super().__init__(message, detail=message)
 
 
 class PaymentGatewayError(ExternalServiceError):
@@ -102,4 +117,15 @@ class LedgerImbalanceError(DomainException):
         self.transaction_id = transaction_id
         self.reference = reference
         self.imbalance = imbalance
+
+
+class ConcurrentUpdateException(DomainException):
+    """
+    Raised when a database record is locked by another transaction (NOWAIT conflict).
+    Signals that an operation could not acquire an exclusive row-level lock.
+    """
+
+    def __init__(self, message: str = "Resource is locked by another concurrent process", *, detail: str | None = None) -> None:
+        super().__init__(message, detail=detail or message)
+
 

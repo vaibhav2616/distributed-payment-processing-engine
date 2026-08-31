@@ -25,6 +25,7 @@ class SqlAlchemyPaymentRepository(AbstractPaymentRepository):
             currency=entity.currency,
             status=entity.status,          # PaymentStatus → Enum column directly
             gateway_ref=entity.gateway_ref,
+            amount_refunded=entity.amount_refunded,
             failure_reason=entity.failure_reason,
             created_at=entity.created_at,
             updated_at=entity.updated_at,
@@ -39,6 +40,7 @@ class SqlAlchemyPaymentRepository(AbstractPaymentRepository):
             currency=model.currency,
             status=model.status,           # Enum column → PaymentStatus directly
             gateway_ref=model.gateway_ref,
+            amount_refunded=model.amount_refunded,
             failure_reason=model.failure_reason,
             created_at=model.created_at,
             updated_at=model.updated_at,
@@ -144,3 +146,40 @@ class SqlAlchemyPaymentRepository(AbstractPaymentRepository):
             return None
 
         return self._to_entity(model)
+
+    async def lock_by_reference_id(
+        self,
+        reference_id: str,
+    ) -> PaymentAggregate | None:
+        """
+        Acquire a SELECT ... FOR UPDATE NOWAIT lock on a payment row by reference_id.
+        Matches by payment_id, gateway_ref, or transaction_id.
+
+        Raises:
+            ConcurrentUpdateException: If the row is locked by another transaction.
+        """
+        from domain.exceptions import ConcurrentUpdateException
+
+        stmt = (
+            select(PaymentModel)
+            .where(
+                (PaymentModel.payment_id == reference_id)
+                | (PaymentModel.gateway_ref == reference_id)
+                | (PaymentModel.transaction_id == reference_id)
+            )
+            .with_for_update(nowait=True)
+        )
+        try:
+            result = await self._session.execute(stmt)
+            model = result.scalar_one_or_none()
+        except OperationalError as exc:
+            raise ConcurrentUpdateException(
+                f"Payment with reference_id '{reference_id}' is locked by another process.",
+                detail=f"Row with reference_id '{reference_id}' is currently locked by a concurrent transaction.",
+            ) from exc
+
+        if model is None:
+            return None
+
+        return self._to_entity(model)
+

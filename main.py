@@ -16,6 +16,8 @@ from fastapi import FastAPI
 from core.config import settings
 from core.logging import configure_logging
 from presentation.api.v1.payments import router as payments_v1_router
+from presentation.api.v1.webhooks import router as webhooks_v1_router
+from presentation.api.v1.refunds import router as refunds_v1_router
 from infrastructure.telemetry.context import TraceIdMiddleware
 from presentation.middleware import (
     IdempotencyMiddleware,
@@ -45,6 +47,8 @@ def create_app() -> FastAPI:
     app.add_middleware(TraceIdMiddleware)
 
     app.include_router(payments_v1_router, prefix="/api/v1")
+    app.include_router(webhooks_v1_router, prefix="/api/v1")
+    app.include_router(refunds_v1_router, prefix="/api/v1")
 
     @app.on_event("startup")
     async def startup_event() -> None:

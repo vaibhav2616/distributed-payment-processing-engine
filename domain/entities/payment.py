@@ -103,6 +103,7 @@ class PaymentStatus(str, Enum):
     AUTHORIZED = "AUTHORIZED"
     CAPTURED = "CAPTURED"
     FAILED = "FAILED"
+    PARTIALLY_REFUNDED = "PARTIALLY_REFUNDED"
     REFUNDED = "REFUNDED"
 
 
@@ -114,7 +115,8 @@ _ALLOWED_TRANSITIONS: dict[PaymentStatus, frozenset[PaymentStatus]] = {
     PaymentStatus.AUTHORIZED: frozenset(
         {PaymentStatus.CAPTURED, PaymentStatus.FAILED}
     ),
-    PaymentStatus.CAPTURED: frozenset({PaymentStatus.REFUNDED}),
+    PaymentStatus.CAPTURED: frozenset({PaymentStatus.PARTIALLY_REFUNDED, PaymentStatus.REFUNDED}),
+    PaymentStatus.PARTIALLY_REFUNDED: frozenset({PaymentStatus.PARTIALLY_REFUNDED, PaymentStatus.REFUNDED}),
     PaymentStatus.FAILED: frozenset(),    # terminal
     PaymentStatus.REFUNDED: frozenset(),  # terminal
 }
@@ -142,6 +144,7 @@ class PaymentAggregate:
         status          Current lifecycle state.
         gateway_ref     Acquirer reference returned on authorisation.
         failure_reason  Human-readable failure reason when status == FAILED.
+        amount_refunded Total amount refunded so far (Decimal).
         created_at      UTC wall-clock timestamp at creation.
         updated_at      UTC wall-clock timestamp of the last state change.
         _events         In-memory list of uncommitted domain events.
@@ -154,6 +157,7 @@ class PaymentAggregate:
     status: PaymentStatus = PaymentStatus.PENDING
     gateway_ref: str | None = None
     failure_reason: str | None = None
+    amount_refunded: Decimal = field(default_factory=lambda: Decimal("0.00"))
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     _events: list["DomainEvent"] = field(default_factory=list, repr=False)
@@ -307,26 +311,89 @@ class PaymentAggregate:
             )
         )
 
-    def refund(self) -> None:
+    def process_refund(self, amount: Decimal) -> None:
         """
-        Marks a CAPTURED payment as REFUNDED.
+        Processes a partial or full refund against a CAPTURED or PARTIALLY_REFUNDED payment.
+
+        Args:
+            amount: The amount to refund.
 
         Raises:
-            InvalidStateTransitionError: When the current state is not CAPTURED.
+            InvalidStateTransitionError: If the payment is not in a valid state for refund.
+            InvalidRefundAmountError: If the requested amount exceeds the remaining refundable balance.
         """
         from domain.events.payment_events import PaymentRefunded
+        from domain.exceptions import InvalidRefundAmountError
 
-        self._assert_transition(PaymentStatus.REFUNDED)
-        self.status = PaymentStatus.REFUNDED
+        # Only allow refunds if currently CAPTURED or PARTIALLY_REFUNDED
+        if self.status not in (PaymentStatus.CAPTURED, PaymentStatus.PARTIALLY_REFUNDED):
+            self._assert_transition(PaymentStatus.REFUNDED) # this will raise appropriately
+
+        try:
+            amount_decimal = Decimal(str(amount)).quantize(Decimal("0.01"))
+        except InvalidOperation as exc:
+            raise ValueError(f"Invalid refund amount: '{amount}'.") from exc
+
+        if amount_decimal <= Decimal("0"):
+            raise ValueError(f"Refund amount must be strictly positive; got {amount_decimal}.")
+
+        remaining_refundable = self.amount - self.amount_refunded
+        if amount_decimal > remaining_refundable:
+            raise InvalidRefundAmountError(
+                requested=str(amount_decimal),
+                max_allowed=str(remaining_refundable)
+            )
+
+        self.amount_refunded += amount_decimal
+        
+        if self.amount_refunded == self.amount:
+            self.status = PaymentStatus.REFUNDED
+        else:
+            self.status = PaymentStatus.PARTIALLY_REFUNDED
+            
         self.updated_at = datetime.now(timezone.utc)
+        
         self._record(
             PaymentRefunded(
                 aggregate_id=self.payment_id,
                 transaction_id=self.transaction_id,
-                amount=str(self.amount),
+                amount=str(amount_decimal),
                 currency=self.currency,
             )
         )
+
+    def refund(self) -> None:
+        """
+        Legacy full refund method.
+        Marks a CAPTURED payment as REFUNDED completely.
+        """
+        self.process_refund(self.amount - self.amount_refunded)
+
+    def fail_refund(self, amount: Decimal) -> None:
+        """
+        Compensating transaction method for when a refund definitively fails at the gateway.
+        Reverts the amount_refunded and updates status based on the new total.
+        """
+        try:
+            amount_decimal = Decimal(str(amount)).quantize(Decimal("0.01"))
+        except InvalidOperation as exc:
+            raise ValueError(f"Invalid refund amount: '{amount}'.") from exc
+
+        if amount_decimal <= Decimal("0"):
+            raise ValueError(f"Refund amount must be strictly positive; got {amount_decimal}.")
+
+        self.amount_refunded -= amount_decimal
+        
+        # Ensure we don't drop below 0
+        if self.amount_refunded < Decimal("0"):
+            self.amount_refunded = Decimal("0")
+
+        if self.amount_refunded == Decimal("0"):
+            self.status = PaymentStatus.CAPTURED
+        else:
+            self.status = PaymentStatus.PARTIALLY_REFUNDED
+            
+        self.updated_at = datetime.now(timezone.utc)
 
     # ------------------------------------------------------------------
     # Domain event collection
