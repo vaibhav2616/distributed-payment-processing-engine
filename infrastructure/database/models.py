@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import sqlalchemy as sa
 from sqlalchemy import DateTime, Enum, ForeignKey, Numeric, String, Text, Boolean, Uuid

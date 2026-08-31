@@ -1,8 +1,8 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: dppe-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -12,32 +12,136 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
+      test: ["CMD-SHELL", "pg_isready -U postgres -d payments_db"]
+      interval: 3s
+      timeout: 3s
       retries: 5
+      start_period: 5s
 
   redis:
     image: redis:7-alpine
+    container_name: dppe-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.11
+    container_name: dppe-redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --smp
+      - "1"
+      - --memory
+      - "512M"
+      - --reserve-memory
+      - "0M"
+      - --overprovisioned
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092,OUTSIDE://localhost:19092
+    ports:
+      - "9092:9092"
+      - "19092:19092"
+      - "9644:9644"
+    volumes:
+      - redpandadata:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -i healthy || exit 0"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dppe-api
+    restart: unless-stopped
+    command: sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/payments_db
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      RUN_OUTBOX_IN_PROCESS: "false"
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
 
-  kafka:
-    image: bitnami/kafka:3.6
+  worker-reconciler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dppe-worker-reconciler
+    restart: unless-stopped
+    command: python -m application.workers.reconciler
     environment:
-      KAFKA_CFG_NODE_ID: 0
-      KAFKA_CFG_PROCESS_ROLES: controller,broker
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-    ports:
-      - "9092:9092"
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/payments_db
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      RECONCILER_INTERVAL_SECONDS: "5"
+      RECONCILER_STALE_THRESHOLD_SECONDS: "30"
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  worker-outbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dppe-worker-outbox
+    restart: unless-stopped
+    command: python -m application.workers.outbox_relay
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/payments_db
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      api:
+        condition: service_healthy
 
 volumes:
   pgdata:
+  redisdata:
+  redpandadata:

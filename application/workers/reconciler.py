@@ -63,7 +63,9 @@ the payment between Phase 1 and Phase 3, we detect it and skip without writing.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable
@@ -420,3 +422,45 @@ class BackgroundReconciliationEngine:
             gw_status=gw_status,
         )
         return ReconcilerRunResult(failed=1)
+
+    async def run_forever(self, interval_seconds: int = 10) -> None:
+        """Execute reconciliation sweeps continuously on a scheduled loop."""
+        log = logger.bind(worker="BackgroundReconciliationEngine")
+        log.info("reconciler.loop.started", interval_seconds=interval_seconds)
+        while True:
+            try:
+                result = await self.run()
+                if result.swept > 0:
+                    log.info(
+                        "reconciler.loop.cycle_summary",
+                        swept=result.swept,
+                        captured=result.captured,
+                        failed=result.failed,
+                        skipped=result.skipped,
+                        errors=result.errors,
+                    )
+            except Exception as exc:
+                log.error("reconciler.loop.unexpected_error", error=str(exc))
+            await asyncio.sleep(interval_seconds)
+
+
+async def main() -> None:
+    from application.uow import SqlAlchemyUnitOfWork
+    from infrastructure.external.gateway_client import gateway_client
+
+    interval = int(os.getenv("RECONCILER_INTERVAL_SECONDS", "10"))
+    stale_threshold = int(os.getenv("RECONCILER_STALE_THRESHOLD_SECONDS", "60"))
+    batch_size = int(os.getenv("RECONCILER_BATCH_SIZE", "50"))
+
+    engine = BackgroundReconciliationEngine(
+        uow_factory=SqlAlchemyUnitOfWork,
+        gateway=gateway_client,
+        stale_threshold_s=stale_threshold,
+        batch_size=batch_size,
+    )
+    await engine.run_forever(interval_seconds=interval)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+

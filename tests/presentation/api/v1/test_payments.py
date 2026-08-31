@@ -22,6 +22,21 @@ from presentation.api.v1.payments import get_orchestrator, get_uow_factory
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def mock_redis_for_router(monkeypatch):
+    class MockRedisClient:
+        async def get(self, key):
+            return None
+        async def set(self, key, value, expire=300):
+            return True
+        async def acquire_lock(self, key, expire=15):
+            return "mock-token-123"
+        async def release_lock(self, key, token):
+            return True
+    from presentation.middleware import idempotency
+    monkeypatch.setattr(idempotency, "redis_client", MockRedisClient())
+
+
 # ---------------------------------------------------------------------------
 # Mock Dependencies
 # ---------------------------------------------------------------------------

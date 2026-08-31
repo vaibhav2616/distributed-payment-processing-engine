@@ -54,7 +54,9 @@ def create_app() -> FastAPI:
     async def startup_event() -> None:
         try:
             await kafka_producer.start()
-            asyncio.create_task(poll_outbox_events())
+            import os
+            if os.getenv("RUN_OUTBOX_IN_PROCESS", "false").lower() == "true":
+                asyncio.create_task(poll_outbox_events())
             logger.info("application_started", service=settings.PROJECT_NAME)
         except Exception as exc:
             logger.warning("infrastructure_startup_warning", error=str(exc))

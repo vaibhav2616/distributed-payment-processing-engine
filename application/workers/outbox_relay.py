@@ -86,3 +86,38 @@ async def poll_outbox_events() -> None:
             logger.error("outbox_relay_poll_error", error=str(exc))
         
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+
+
+class OutboxRelayWorker:
+    """Transactional Outbox relay worker that streams events to Redpanda/Kafka."""
+
+    def __init__(
+        self,
+        poll_interval: int = _POLL_INTERVAL_SECONDS,
+        batch_size: int = _BATCH_SIZE,
+        max_retries: int = _MAX_RETRIES,
+    ) -> None:
+        self.poll_interval = poll_interval
+        self.batch_size = batch_size
+        self.max_retries = max_retries
+
+    async def run(self) -> None:
+        logger.info("outbox_relay_worker_starting", poll_interval=self.poll_interval)
+        # Retry connecting to Redpanda/Kafka until cluster is ready
+        while True:
+            try:
+                await kafka_producer.start()
+                break
+            except Exception as exc:
+                logger.warning("kafka_producer_wait_retry", error=str(exc))
+                await asyncio.sleep(2)
+
+        try:
+            await poll_outbox_events()
+        finally:
+            await kafka_producer.stop()
+
+
+if __name__ == "__main__":
+    worker = OutboxRelayWorker()
+    asyncio.run(worker.run())

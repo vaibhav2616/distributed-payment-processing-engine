@@ -23,7 +23,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         if request.method != "POST":
             return await call_next(request)
 
-        idempotency_key = request.headers.get("X-Idempotency-Key")
+        idempotency_key = request.headers.get("Idempotency-Key") or request.headers.get("X-Idempotency-Key")
         if not idempotency_key:
             return await call_next(request)
 
@@ -69,6 +69,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                 content=content,
                 media_type="application/json",
                 status_code=status_code,
+                headers={"X-Cache": "HIT", "X-Idempotency-Status": "CACHED"},
             )
 
         # 2. Acquire atomic distributed lock (prevents race conditions)
@@ -80,10 +81,13 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                 ),
                 media_type="application/json",
                 status_code=409,
+                headers={"X-Cache": "BYPASS", "X-Idempotency-Status": "LOCKED"},
             )
 
         try:
             response = await call_next(request)
+            response.headers["X-Cache"] = "MISS"
+            response.headers["X-Idempotency-Status"] = "EXECUTED"
 
             # 3. Cache successful responses for idempotent replay
             if response.status_code in (200, 201, 202, 422):

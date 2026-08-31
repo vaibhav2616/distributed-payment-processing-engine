@@ -62,6 +62,7 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     # 3. status: VARCHAR(20) → paymentstatus ENUM
     # ------------------------------------------------------------------
+    op.alter_column("payments", "status", server_default=None)
     op.alter_column(
         "payments",
         "status",
@@ -70,6 +71,7 @@ def upgrade() -> None:
         postgresql_using=f"status::{_ENUM_NAME}",
         nullable=False,
     )
+    op.alter_column("payments", "status", server_default="PENDING")
 
     # ------------------------------------------------------------------
     # 4. created_at / updated_at: TIMESTAMP → TIMESTAMPTZ
