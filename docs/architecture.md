@@ -1,4 +1,4 @@
-# V1 Architecture Documentation — Distributed Payment Processing Engine
+# Architecture Documentation — Distributed Payment Processing Engine (V1 & V2 Core)
 
 ## Table of Contents
 
@@ -6,11 +6,17 @@
 2. [Layer Map](#layer-map)
 3. [Domain Invariants](#domain-invariants)
 4. [Eventual Consistency & Reconciliation](#eventual-consistency--reconciliation)
-5. [Idempotency Contract](#idempotency-contract)
-6. [Outbox Relay & Poison-Pill Circuit Breaker](#outbox-relay--poison-pill-circuit-breaker)
-7. [PCI-DSS Compliance](#pci-dss-compliance)
-8. [Observability & Telemetry](#observability--telemetry)
-9. [Database Migrations](#database-migrations)
+5. [Distributed Circuit Breaker](#distributed-circuit-breaker-infrastructureexternalcircuit_breakerpy)
+6. [Asynchronous Webhook Receiver](#asynchronous-webhook-receiver-presentationapiv1webhookspy)
+7. [Refund Orchestration & Compensating Sagas](#refund-orchestration--compensating-sagas-presentationapiv1refundspy)
+8. [Idempotency Contract](#idempotency-contract)
+9. [Outbox Relay & Poison-Pill Circuit Breaker](#outbox-relay--poison-pill-circuit-breaker)
+10. [PCI-DSS Compliance](#pci-dss-compliance)
+11. [Observability & Telemetry](#observability--telemetry)
+12. [Containerized Production Topology](#containerized-production-topology-docker-composeyml)
+13. [Chaos Concurrency Harness & Load Testing](#chaos-concurrency-harness--load-testing-testsloadlocustfilepy)
+14. [Database Migrations](#database-migrations)
+15. [System Design RFC Reference](#system-design-rfc-reference)
 
 ---
 
@@ -184,6 +190,39 @@ Handles asynchronous payment notifications from external gateways (e.g. Stripe, 
 
 ---
 
+## Refund Orchestration & Compensating Sagas (`presentation/api/v1/refunds.py`)
+
+Handles safe reversals of captured funds without violating immutable accounting or over-refunding.
+
+### Strict Invariants & Domain FSM
+
+1. **State Machine Validity**: Refunds can only be executed against payments in state `CAPTURED` or `PARTIALLY_REFUNDED`.
+2. **Cap on Refunds**: If `amount_refunded + refund_amount > amount_captured`, the aggregate rejects the attempt with `InvalidRefundAmountError` (HTTP 422).
+3. **State Transitions**:
+   * If `amount_refunded == amount_captured`: state transitions to `REFUNDED`.
+   * If `amount_refunded < amount_captured`: state transitions to `PARTIALLY_REFUNDED`.
+
+### The 3-Phase Refund Saga & Compensating Transaction
+
+```
+Phase 1: Local Reservation (Short DB Transaction 1)
+  - uow.begin() -> SELECT FOR UPDATE NOWAIT on payment
+  - payment.process_refund(amount) -> update amount_refunded
+  - Enqueue refund.initiated outbox event -> Commit
+
+Phase 2: Gateway Network Call (No DB resources held)
+  - gateway.refund(gateway_ref, amount, refund_idempotency_key)
+
+Phase 3: Finalization or Compensating Rollback
+  - SUCCESS: Enqueue refund.succeeded outbox event -> Commit -> HTTP 200
+  - DECLINE: GatewayDeclineException caught
+      - uow.begin() -> SELECT FOR UPDATE NOWAIT on payment
+      - payment.fail_refund(amount)  [Compensating Transaction]
+      - Enqueue refund.failed outbox event -> Commit -> HTTP 422
+```
+
+---
+
 ## Idempotency Contract
 
 ### Rules
@@ -300,6 +339,70 @@ All logs are emitted as structured JSON via structlog. Every log line contains:
 
 ---
 
+## Containerized Production Topology (`docker-compose.yml`)
+
+The system deploys as a multi-service production topology separating stateless web processes, asynchronous worker loops, and stateful infrastructure:
+
+```
+                    ┌────────────────────────────┐
+                    │      HTTP Clients          │
+                    └──────────────┬─────────────┘
+                                   │ :8000
+                                   ▼
+                    ┌────────────────────────────┐
+                    │     api (FastAPI/Uvicorn)  │
+                    └──────┬───────────────┬─────┘
+                           │               │
+       ┌───────────────────┘               └──────────────────┐
+       ▼                                                      ▼
+┌──────────────┐                                       ┌──────────────┐
+│   postgres   │                                       │    redis     │
+│  Postgres 16 │                                       │   Redis 7    │
+│  (Port 5432) │                                       │  (Port 6379) │
+└──────▲───────┘                                       └──────▲───────┘
+       │                                                      │
+       ├─────────────────────────────────┐                    │
+       │                                 │                    │
+┌──────┴───────────────┐          ┌──────┴───────────────┐    │
+│  worker-reconciler   │          │    worker-outbox     │    │
+│ (Reconciliation Loop)│          │  (Outbox Relay Loop) │    │
+└──────────────────────┘          └──────────────┬───────┘    │
+                                                 │            │
+                                                 ▼            │
+                                          ┌──────────────┐    │
+                                          │   redpanda   │    │
+                                          │(Kafka Drop-in│    │
+                                          │  Port 9092)  │    │
+                                          └──────────────┘    │
+                                                              │
+                                          (Locks & Breaker) ──┘
+```
+
+* **`postgres`** (`postgres:16-alpine`): Stores payment records, double-entry ledger entries, and transactional outbox events.
+* **`redis`** (`redis:7-alpine`): Distributed lock manager (`SET NX EX 15`), idempotency response cache (48hr TTL), and distributed circuit breaker state coordinator.
+* **`redpanda`** (`docker.redpanda.com/redpandadata/redpanda:v23.3.11`): Lightweight Kafka drop-in running in single-node mode.
+* **`api`**: Boots from `Dockerfile`, executes `alembic upgrade head`, and serves REST endpoints via Uvicorn.
+* **`worker-reconciler`**: Independent container running [BackgroundReconciliationEngine.run_forever()](file:///home/nitrov/distributed-payment-processing-engine/application/workers/reconciler.py).
+* **`worker-outbox`**: Independent container running [OutboxRelayWorker.run()](file:///home/nitrov/distributed-payment-processing-engine/application/workers/outbox_relay.py) streaming events to Redpanda topics.
+
+---
+
+## Chaos Concurrency Harness & Load Testing (`tests/load/locustfile.py`)
+
+To verify system resilience against race conditions, the engine includes a Locust load test harness simulating an **Idempotency Stampede**:
+
+* **Simulated Race Condition**: Each simulated user cycle generates a unique `Idempotency-Key` and uses `gevent.pool.Group` to fire **10 concurrent requests simultaneously** with that exact key.
+* **Empirical Assertions**:
+  1. **Zero HTTP 500s**: Confirms that PostgreSQL connection pool limits are never exhausted under concurrency spikes.
+  2. **Exactly 1 Orchestrator Execution**: Asserts that only 1 of the 10 requests acquires the Redis lock and invokes the orchestrator (`201 Created` or `202 Accepted`).
+  3. **Guarded Replays**: Asserts that the remaining 9 requests are intercepted by the Redis distributed lock (`409 Conflict`) or safely return the cached response (`X-Cache: HIT`).
+* **Execution**:
+  ```bash
+  uv run locust -f tests/load/locustfile.py --headless -u 1 -r 1 -t 10s --host http://localhost:8000
+  ```
+
+---
+
 ## Database Migrations
 
 | Migration | Description |
@@ -310,6 +413,13 @@ All logs are emitted as structured JSON via structlog. Every log line contains:
 | `004` | Align column types to strict Numeric/Enum/UUID |
 | `005` | Add `ledger_transactions` and `ledger_entries` tables |
 | `006` | Add `status` (PENDING/PROCESSED/DLQ) and `retry_count` to `outbox_events`; drop old `processed` boolean |
+| `007` | Add `amount_refunded` column and `PARTIALLY_REFUNDED` enum value to `paymentstatus` |
 
 > [!IMPORTANT]
-> Migrations `005` and `006` must be applied before deploying the Outbox Relay Worker or the V1 API.
+> All migrations must be applied before booting application pods. The `api` container in `docker-compose.yml` automatically runs `alembic upgrade head` before serving traffic.
+
+---
+
+## System Design RFC Reference
+
+For the comprehensive architectural RFC detailing the theoretical underpinnings, mathematical proofs, and distributed systems trade-offs, consult [docs/architecture/system_design.md](file:///home/nitrov/distributed-payment-processing-engine/docs/architecture/system_design.md).
